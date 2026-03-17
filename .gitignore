@@ -1,0 +1,14 @@
+# Binary
+telsh
+
+# Environment — never commit real credentials
+.env
+
+# Go build cache
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp

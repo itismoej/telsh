@@ -1,0 +1,9 @@
+services:
+  telsh:
+    build: .
+    image: telsh:latest
+    restart: unless-stopped
+    env_file: .env
+    # Required for nsenter to break into the host's namespaces (full SSH-like access).
+    privileged: true
+    pid: "host"
