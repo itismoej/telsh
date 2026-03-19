@@ -7,6 +7,7 @@ SSH over Telegram. A Go-based Telegram bot that gives you a persistent root shel
 - **Persistent sessions** — `cd`, env vars, and shell state carry over between messages (PTY-based)
 - **Host access** — runs commands on the host via `nsenter`, not inside the container
 - **Interactive mode** — toggle raw input mode for `vim`, `nano`, and other TUI programs
+- **TUI mode** — run `lynx`, `vim`, `htop`, etc. inside `tmux` and mirror the screen into one Telegram message
 - **Special keys** — send `ESC`, arrow keys, `Tab`, etc. via `/key`
 - **File transfer** — upload files to and download files from the server
 - **Signals** — send `Ctrl+C`, `Ctrl+Z`, `Ctrl+D`, or `SIGKILL` to running processes
@@ -49,6 +50,9 @@ Send any text message to execute it as a shell command:
 | `/signal <name>` | Send signal: `INT`, `EOF`, `TSTP`, `KILL` |
 | `/download <path>` | Download a file from the server |
 | `/interactive` | Toggle interactive mode (for vim, etc.) |
+| `/tui <command>` | Start a tmux-backed TUI mirrored into Telegram |
+| `/tui stop` | Stop the active TUI session |
+| `/screen` | Refresh the active TUI screen |
 | `/key <name>` | Send special key: `esc`, `enter`, `tab`, `up`, `down`, `left`, `right`, `backspace`, `delete` |
 
 To upload a file, send it to the bot with the destination path as the caption (defaults to `/tmp/`).
@@ -62,6 +66,20 @@ vim config.yaml     — opens vim
 :wq                 — saves and quits
 /interactive        — switch back to normal mode
 ```
+
+### Using full-screen TUIs in Telegram
+
+Install `tmux` on the host, then start the app through `/tui`:
+
+```
+/tui lynx https://example.com
+/key down
+/key enter
+/key esc
+/tui stop
+```
+
+Plain text is sent to the app followed by Enter. `/key ctrl+c` and `/signal INT` both send Ctrl-C to the active TUI.
 
 ## Configuration
 

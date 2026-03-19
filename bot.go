@@ -52,6 +52,7 @@ type Bot struct {
 	sm          *SessionManager
 	cfg         *Config
 	interactive sync.Map // user ID (int64) → bool
+	screens     sync.Map // user ID (int64) → *TUIScreen
 }
 
 // NewBot initialises the Telegram bot client.
@@ -165,6 +166,21 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 			b.reply(msg, "Usage: /signal &lt;INT|EOF|TSTP|KILL&gt;")
 			return
 		}
+		if b.isTUIActive(msg.From.ID) {
+			if err := b.sendTUISignal(msg.From.ID, args); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			if strings.EqualFold(args, "kill") || strings.EqualFold(args, "sigkill") {
+				b.reply(msg, "✅ TUI mode stopped.")
+				return
+			}
+			if err := b.refreshTUI(msg.From.ID); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			return
+		}
 		sess, err := b.sm.Get(msg.From.ID)
 		if err != nil {
 			b.reply(msg, fmt.Sprintf("❌ No session: %v", err))
@@ -184,6 +200,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleDownload(msg, args)
 
 	case "interactive":
+		if b.isTUIActive(msg.From.ID) {
+			b.reply(msg, "❌ TUI mode is active. Stop it with <code>/tui stop</code> first.")
+			return
+		}
 		on := !b.isInteractive(msg.From.ID)
 		b.interactive.Store(msg.From.ID, on)
 		if on {
@@ -192,15 +212,62 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 			b.reply(msg, "✅ Interactive mode <b>OFF</b> — back to normal.")
 		}
 
+	case "tui":
+		switch {
+		case args == "":
+			if !b.isTUIActive(msg.From.ID) {
+				b.reply(msg, "Usage: /tui &lt;command&gt; or <code>/tui stop</code>")
+				return
+			}
+			if err := b.refreshTUI(msg.From.ID); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+			}
+		case strings.EqualFold(args, "stop"):
+			if err := b.stopTUI(msg.From.ID); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			b.reply(msg, "✅ TUI mode stopped.")
+		default:
+			if err := b.startTUI(msg, args); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+		}
+
+	case "screen":
+		if !b.isTUIActive(msg.From.ID) {
+			b.reply(msg, "❌ No active TUI. Start one with <code>/tui &lt;command&gt;</code>.")
+			return
+		}
+		if err := b.refreshTUI(msg.From.ID); err != nil {
+			b.reply(msg, fmt.Sprintf("❌ %v", err))
+		}
+
 	case "key":
 		if args == "" {
 			var names []string
 			for k := range keyMap {
 				names = append(names, k)
 			}
-			b.reply(msg, "Usage: /key &lt;name&gt;\nSupported: <code>"+strings.Join(names, ", ")+"</code>")
+			usage := "Usage: /key &lt;name&gt;\nSupported: <code>" + strings.Join(names, ", ") + "</code>"
+			if b.isTUIActive(msg.From.ID) {
+				usage += "\nTUI mode also supports <code>ctrl+x</code> (for example <code>/key ctrl+c</code>)."
+			}
+			b.reply(msg, usage)
 			return
 		}
+		if b.isTUIActive(msg.From.ID) {
+			if err := b.sendTUIKey(msg.From.ID, strings.ToLower(args)); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			if err := b.refreshTUI(msg.From.ID); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+			}
+			return
+		}
+
 		seq, ok := keyMap[strings.ToLower(args)]
 		if !ok {
 			b.reply(msg, fmt.Sprintf("Unknown key %q — try /key for the list.", html.EscapeString(args)))
@@ -220,6 +287,16 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	default:
 		// In interactive mode, unknown /commands (like /etc/fstab) are sent
 		// as raw text instead of being rejected.
+		if b.isTUIActive(msg.From.ID) {
+			if err := b.sendTUIText(msg.From.ID, msg.Text, true); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			if err := b.refreshTUI(msg.From.ID); err != nil {
+				b.reply(msg, fmt.Sprintf("❌ %v", err))
+			}
+			return
+		}
 		if b.isInteractive(msg.From.ID) {
 			b.handleInteractiveText(msg)
 			return
@@ -230,6 +307,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 
 // handleText treats the message as a shell command and executes it.
 func (b *Bot) handleText(msg *tgbotapi.Message) {
+	if b.isTUIActive(msg.From.ID) {
+		b.handleTUIText(msg)
+		return
+	}
 	if b.isInteractive(msg.From.ID) {
 		b.handleInteractiveText(msg)
 		return
@@ -263,6 +344,16 @@ func (b *Bot) handleText(msg *tgbotapi.Message) {
 	}
 
 	b.sendOutput(msg.Chat.ID, output)
+}
+
+func (b *Bot) handleTUIText(msg *tgbotapi.Message) {
+	if err := b.sendTUIText(msg.From.ID, msg.Text, true); err != nil {
+		b.reply(msg, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	if err := b.refreshTUI(msg.From.ID); err != nil {
+		b.reply(msg, fmt.Sprintf("❌ %v", err))
+	}
 }
 
 // handleInteractiveText sends the message text raw to the PTY (with Enter)
@@ -453,6 +544,9 @@ const helpText = `<b>Commands</b>
 /signal &lt;name&gt; — Send signal: <code>INT</code>, <code>EOF</code>, <code>TSTP</code>, <code>KILL</code>
 /download &lt;path&gt; — Download a file from the server
 /interactive — Toggle interactive mode (for vim, etc.)
+/tui &lt;command&gt; — Run a full-screen app in tmux and mirror its screen here
+/tui stop — Stop the active TUI session
+/screen — Refresh the active TUI screen
 /key &lt;name&gt; — Send a special key: <code>esc</code>, <code>enter</code>, <code>tab</code>, <code>up</code>, <code>down</code>, <code>left</code>, <code>right</code>, <code>backspace</code>, <code>delete</code>, <code>home</code>, <code>end</code>
 Send a file — Upload (set caption = destination path, default /tmp/)
 /help — Show this message
@@ -464,4 +558,9 @@ Each message runs as a shell command and returns output.
 Each message is sent raw + Enter. Use for vim, nano, etc.
 <code>vim file.txt</code> → opens vim
 <code>/key esc</code> → sends ESC
-<code>:wq</code> → sends :wq + Enter (saves &amp; quits)`
+<code>:wq</code> → sends :wq + Enter (saves &amp; quits)
+
+<b>TUI mode</b> (<code>/tui &lt;command&gt;</code>)
+Runs the app inside tmux with an 80x24 screen and edits one Telegram message with the current screen.
+Use plain text for typed input and <code>/key</code> for arrows, ESC, etc.
+Example: <code>/tui lynx https://example.com</code>`
